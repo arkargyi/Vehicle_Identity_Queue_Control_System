@@ -1,0 +1,5 @@
+{
+  "name": "Vehicle Identity Queue Control System",
+  "description": "A smart queue management system for factory and logistics gates using QR codes and real-time updates.",
+  "requestFramePermissions": ["camera"]
+}
