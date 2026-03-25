@@ -1,6 +1,6 @@
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LogOut, LayoutDashboard, Truck, LogIn, LogOut as LogOutIcon, BarChart3, Settings } from 'lucide-react';
+import { LogOut, LayoutDashboard, Truck, LogIn, LogOut as LogOutIcon, BarChart3, Settings, Users, List, History as HistoryIcon } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export default function Layout() {
@@ -14,22 +14,25 @@ export default function Layout() {
   };
 
   const navItems = [
-    { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['admin', 'security', 'operator', 'viewer'] },
-    { name: 'Register Truck', path: '/register', icon: Truck, roles: ['admin', 'operator'] },
-    { name: 'Gate Entry', path: '/entry', icon: LogIn, roles: ['admin', 'security'] },
-    { name: 'Operator Panel', path: '/operator', icon: Settings, roles: ['admin', 'operator'] },
-    { name: 'Gate Exit', path: '/exit', icon: LogOutIcon, roles: ['admin', 'security'] },
-    { name: 'Analytics', path: '/analytics', icon: BarChart3, roles: ['admin', 'viewer'] },
-    { name: 'Settings', path: '/settings', icon: Settings, roles: ['admin'] },
+    { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['super_admin', 'admin', 'queue_manager', 'normal_user'] },
+    { name: 'Register Truck', path: '/register', icon: Truck, roles: ['super_admin', 'admin', 'queue_manager'] },
+    { name: 'Vehicles List', path: '/vehicles', icon: List, roles: ['super_admin', 'admin', 'queue_manager'] },
+    { name: 'Gate Entry', path: '/entry', icon: LogIn, roles: ['super_admin', 'admin', 'normal_user'] },
+    { name: 'Operator Panel', path: '/operator', icon: Settings, roles: ['super_admin', 'admin', 'queue_manager'] },
+    { name: 'Gate Exit', path: '/exit', icon: LogOutIcon, roles: ['super_admin', 'admin', 'normal_user'] },
+    { name: 'History', path: '/history', icon: HistoryIcon, roles: ['super_admin', 'admin', 'queue_manager'] },
+    { name: 'Analytics', path: '/analytics', icon: BarChart3, roles: ['super_admin', 'admin'] },
+    { name: 'Settings', path: '/settings', icon: Settings, roles: ['super_admin', 'admin'] },
+    { name: 'User Management', path: '/users', icon: Users, roles: ['super_admin'] },
   ];
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="flex min-h-screen bg-gray-100 print:block print:bg-white">
       {/* Sidebar */}
-      <div className="w-64 bg-white shadow-md flex flex-col">
+      <div className="w-64 bg-white shadow-md flex flex-col shrink-0 print:hidden">
         <div className="p-6 border-b">
           <h1 className="text-xl font-bold text-gray-800">Vehicle Queue</h1>
-          <p className="text-sm text-gray-500 mt-1">Role: {user?.role}</p>
+          <p className="text-sm text-gray-500 mt-1">Role: {user?.role.replace('_', ' ')}</p>
         </div>
         <nav className="flex-1 p-4 space-y-1">
           {navItems.filter(item => item.roles.includes(user?.role || '')).map((item) => {
@@ -64,8 +67,8 @@ export default function Layout() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto flex flex-col">
-        <header className="bg-white shadow-sm shrink-0">
+      <div className="flex-1 flex flex-col min-w-0 print:block">
+        <header className="bg-white shadow-sm shrink-0 print:hidden">
           <div className="px-8 py-4 flex items-center justify-between">
             <h2 className="text-xl font-semibold text-gray-800">
               {navItems.find(i => i.path === location.pathname)?.name || 'Dashboard'}
@@ -78,7 +81,7 @@ export default function Layout() {
             </div>
           </div>
         </header>
-        <main className="p-8 flex-1 overflow-auto">
+        <main className="p-8 flex-1 overflow-auto print:p-0 print:overflow-visible print:block">
           <Outlet />
         </main>
       </div>

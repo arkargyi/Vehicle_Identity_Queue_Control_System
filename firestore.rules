@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "arkargyi.rk57@gmail.com" || 
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'super_admin')
+      );
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || (
+        isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'admin'
+      );
+    }
+    
+    function isQueueManager() {
+      return isAdmin() || (
+        isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'queue_manager'
+      );
+    }
+    
+    function isNormalUser() {
+      return isAuthenticated();
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isSuperAdmin() || (request.auth.uid == userId && request.resource.data.role == 'normal_user');
+      allow update: if isSuperAdmin() || (request.auth.uid == userId && request.resource.data.role == resource.data.role);
+      allow delete: if isSuperAdmin();
+    }
+    
+    match /trucks/{truckId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isQueueManager();
+      allow delete: if isAdmin();
+    }
+    
+    match /gates/{gateId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+    
+    match /queues/{queueId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isNormalUser(); // Normal user can do gate entry/exit
+      allow delete: if isAdmin();
+    }
+    
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // Immutable
+    }
+    
+    match /settings/{settingId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}

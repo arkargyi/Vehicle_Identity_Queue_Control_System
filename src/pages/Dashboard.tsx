@@ -1,27 +1,154 @@
 import { useState, useEffect } from 'react';
-import { io } from 'socket.io-client';
 import { Clock, Truck, CheckCircle, AlertCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { cn } from '../lib/utils';
+import { db } from '../firebase';
+import { collection, query, where, onSnapshot, getDocs, getDoc, doc, orderBy } from 'firebase/firestore';
 
 export default function Dashboard() {
   const [queues, setQueues] = useState<any[]>([]);
-  const [analytics, setAnalytics] = useState<any>({});
-
-  const fetchData = async () => {
-    const [qRes, aRes] = await Promise.all([
-      fetch('/api/queues'),
-      fetch('/api/analytics')
-    ]);
-    setQueues(await qRes.json());
-    setAnalytics(await aRes.json());
-  };
+  const [analytics, setAnalytics] = useState<any>({
+    totalTrucks: 0,
+    activeQueues: 0,
+    completedToday: 0,
+    avgWaitTime: 0
+  });
+  const [isConnected, setIsConnected] = useState(true);
+  const [maxWaitTime, setMaxWaitTime] = useState<number>(0);
+  const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
-    fetchData();
-    const socket = io();
-    socket.on('queue_updated', fetchData);
-    return () => { socket.disconnect(); };
+    const timer = setInterval(() => setCurrentTime(new Date()), 60000); // Update every minute
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (queues.length > 0) {
+      const waitingTrucks = queues.filter(q => q.status === 'waiting');
+      if (waitingTrucks.length > 0) {
+        const oldest = waitingTrucks.reduce((prev, current) => {
+          return (prev.entry_time < current.entry_time) ? prev : current;
+        });
+        const waitMins = Math.round((new Date().getTime() - oldest.entry_time.getTime()) / 60000);
+        setMaxWaitTime(waitMins > 0 ? waitMins : 0);
+      } else {
+        setMaxWaitTime(0);
+      }
+    }
+  }, [queues, currentTime]);
+
+  useEffect(() => {
+    const q = query(
+      collection(db, 'queues'),
+      where('status', 'in', ['waiting', 'called', 'processing'])
+    );
+
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      setIsConnected(true);
+      const queueData = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      
+      // Fetch truck details for each queue
+      const enrichedQueues = await Promise.all(queueData.map(async (qItem: any) => {
+        let truckData: any = {};
+        if (qItem.truck_id) {
+          const truckDoc = await getDoc(doc(db, 'trucks', qItem.truck_id));
+          if (truckDoc.exists()) {
+            truckData = truckDoc.data();
+          }
+        }
+        
+        let gateName = '';
+        if (qItem.gate_id) {
+          const gateDoc = await getDoc(doc(db, 'gates', qItem.gate_id));
+          if (gateDoc.exists()) {
+            gateName = gateDoc.data().name;
+          }
+        }
+
+        return {
+          ...qItem,
+          plate_number: truckData.plate_number || 'Unknown',
+          company: truckData.company || 'Unknown',
+          cane_type: truckData.cane_type || 'Unknown',
+          driver_name: truckData.driver_name || 'Unknown',
+          gate_name: gateName,
+          entry_time: qItem.entry_time?.toDate() || new Date(),
+          call_time: qItem.call_time?.toDate() || new Date(),
+          process_time: qItem.process_time?.toDate() || new Date(),
+          estimated_wait_mins: 15 // Placeholder
+        };
+      }));
+
+      // Sort by priority (high first) then entry time
+      enrichedQueues.sort((a, b) => {
+        if (a.priority === 'high' && b.priority !== 'high') return -1;
+        if (a.priority !== 'high' && b.priority === 'high') return 1;
+        return a.entry_time.getTime() - b.entry_time.getTime();
+      });
+
+      setQueues(enrichedQueues);
+      
+      // Update basic analytics
+      setAnalytics(prev => ({
+        ...prev,
+        activeQueues: enrichedQueues.length
+      }));
+    }, (error) => {
+      console.error("Error fetching queues:", error);
+      setIsConnected(false);
+    });
+
+    // Fetch total trucks and completed today
+    const fetchAnalytics = async () => {
+      try {
+        const trucksSnapshot = await getDocs(collection(db, 'trucks'));
+        const totalTrucks = trucksSnapshot.size;
+
+        // Start of today
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+
+        const completedQuery = query(
+          collection(db, 'queues'),
+          where('status', '==', 'completed')
+        );
+        const completedSnapshot = await getDocs(completedQuery);
+        let completedToday = 0;
+        let totalWaitTime = 0;
+        let waitCount = 0;
+
+        completedSnapshot.forEach(d => {
+          const data = d.data();
+          if (data.exit_time && data.exit_time.toDate() >= startOfToday) {
+            completedToday++;
+          }
+          if (data.entry_time && data.exit_time) {
+            const entry = data.entry_time.toDate();
+            const exit = data.exit_time.toDate();
+            const waitMins = (exit.getTime() - entry.getTime()) / 60000;
+            if (waitMins > 0) {
+              totalWaitTime += waitMins;
+              waitCount++;
+            }
+          }
+        });
+
+        const avgWaitTime = waitCount > 0 ? Math.round(totalWaitTime / waitCount) : 0;
+
+        setAnalytics(prev => ({
+          ...prev,
+          totalTrucks,
+          completedToday,
+          avgWaitTime
+        }));
+      } catch (error) {
+        console.error("Error fetching analytics:", error);
+      }
+    };
+    
+    fetchAnalytics();
+
+    return () => unsubscribe();
   }, []);
 
   const waiting = queues.filter(q => q.status === 'waiting');
@@ -30,6 +157,13 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <div className="flex justify-end">
+        <span className={cn("inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border", isConnected ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200")}>
+          <span className={cn("w-2 h-2 rounded-full mr-2", isConnected ? "bg-green-500 animate-pulse" : "bg-red-500")}></span>
+          {isConnected ? 'System Live' : 'Offline'}
+        </span>
+      </div>
+
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
@@ -93,8 +227,16 @@ export default function Dashboard() {
               <div key={q.id} className={cn("p-4 rounded-lg border", q.priority === 'high' ? "border-red-200 bg-red-50" : "border-gray-200 bg-white")}>
                 <div className="flex justify-between items-start">
                   <div>
-                    <span className="text-xs font-bold text-gray-500 uppercase">#{i + 1}</span>
-                    <h4 className="font-bold text-lg text-gray-900">{q.plate_number}</h4>
+                    <span className="text-xs font-bold text-gray-500 uppercase" title="Seniority Number">#{q.seniority_number || i + 1}</span>
+                    <h4 className="font-bold text-lg text-gray-900 flex items-center gap-2">
+                      {q.plate_number}
+                      {q.is_double_entry && (
+                        <span className="px-1.5 py-0.5 bg-red-100 text-red-800 text-[10px] font-bold rounded flex items-center" title="Entered multiple times in this round">
+                          <AlertCircle className="w-3 h-3 mr-0.5" />
+                          Double Entry
+                        </span>
+                      )}
+                    </h4>
                     <p className="text-sm text-gray-600">{q.company} • {q.cane_type}</p>
                   </div>
                   {q.priority === 'high' && (
@@ -104,10 +246,10 @@ export default function Dashboard() {
                 <div className="mt-3 text-xs text-gray-500 flex items-center justify-between">
                   <div className="flex items-center">
                     <Clock className="w-3 h-3 mr-1" />
-                    Waiting {formatDistanceToNow(new Date(q.entry_time))}
+                    Waiting {formatDistanceToNow(q.entry_time)}
                   </div>
                   <div className="flex items-center text-indigo-600 font-medium bg-indigo-50 px-2 py-0.5 rounded">
-                    Est. wait: ~{q.estimated_wait_mins}m
+                    Est. wait: ~{maxWaitTime}m
                   </div>
                 </div>
               </div>
@@ -171,7 +313,7 @@ export default function Dashboard() {
                 </div>
                 <div className="mt-3 text-xs text-gray-500 flex items-center">
                   <Clock className="w-3 h-3 mr-1" />
-                  Started {formatDistanceToNow(new Date(q.process_time))} ago
+                  Started {formatDistanceToNow(q.process_time)} ago
                 </div>
               </div>
             ))}

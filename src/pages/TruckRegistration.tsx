@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Printer, CheckCircle, Upload, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { db } from '../firebase';
+import { collection, doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { v4 as uuidv4 } from 'uuid';
 
 export default function TruckRegistration() {
   const { user } = useAuth();
@@ -20,15 +23,26 @@ export default function TruckRegistration() {
   const [caneTypes, setCaneTypes] = useState<string[]>([]);
 
   useEffect(() => {
-    fetch('/api/settings')
-      .then(res => res.json())
-      .then(data => {
-        if (data.cane_types && data.cane_types.length > 0) {
-          setCaneTypes(data.cane_types);
-          setFormData(prev => ({ ...prev, cane_type: data.cane_types[0] }));
+    const fetchSettings = async () => {
+      try {
+        const configDoc = await getDoc(doc(db, 'settings', 'config'));
+        if (configDoc.exists()) {
+          const data = configDoc.data();
+          if (data.cane_types && data.cane_types.length > 0) {
+            setCaneTypes(data.cane_types);
+            setFormData(prev => ({ ...prev, cane_type: data.cane_types[0] }));
+          }
+        } else {
+          // Default fallback
+          const defaultTypes = ['Normal', 'Sling', 'Burnt Cane', 'Debt Cane', 'Special Q (A)', 'Special Q (B)', 'Irrigation Cane', 'Other(PZG,Tri-Cycle,OX-Cart)'];
+          setCaneTypes(defaultTypes);
+          setFormData(prev => ({ ...prev, cane_type: defaultTypes[0] }));
         }
-      })
-      .catch(err => console.error('Failed to fetch settings', err));
+      } catch (err) {
+        console.error('Failed to fetch settings', err);
+      }
+    };
+    fetchSettings();
   }, []);
 
   const validateForm = () => {
@@ -52,7 +66,6 @@ export default function TruckRegistration() {
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
-    // Clear field error on change
     if (fieldErrors[name]) {
       setFieldErrors(prev => ({ ...prev, [name]: '' }));
     }
@@ -66,18 +79,24 @@ export default function TruckRegistration() {
     if (!validateForm()) return;
 
     try {
-      const res = await fetch('/api/trucks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+      const truckId = uuidv4();
+      await setDoc(doc(db, 'trucks', truckId), {
+        ...formData,
+        is_blacklisted: false,
+        created_at: serverTimestamp()
       });
-      const data = await res.json();
-      if (data.success) {
-        setRegisteredTruckId(data.id);
-      } else {
-        setError(data.message);
-      }
-    } catch (err) {
+      
+      // Add audit log
+      await setDoc(doc(collection(db, 'audit_logs')), {
+        user_id: user?.id || 'unknown',
+        action: 'REGISTER_TRUCK',
+        details: `Registered truck ${formData.plate_number}`,
+        timestamp: serverTimestamp()
+      });
+
+      setRegisteredTruckId(truckId);
+    } catch (err: any) {
+      console.error(err);
       setError('Failed to register truck');
     }
   };
@@ -95,7 +114,6 @@ export default function TruckRegistration() {
         const text = event.target?.result as string;
         const lines = text.split('\n').filter(line => line.trim());
         
-        // Skip header row if exists, assuming format: plate_number,driver_name,company,vehicle_type,cane_type
         const startIndex = lines[0].toLowerCase().includes('plate') ? 1 : 0;
         
         const trucks = lines.slice(startIndex).map(line => {
@@ -114,20 +132,23 @@ export default function TruckRegistration() {
           return;
         }
 
-        const res = await fetch('/api/trucks/bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ trucks })
-        });
-        
-        const data = await res.json();
-        if (data.success) {
-          const successCount = data.results.filter((r: any) => r.success).length;
-          setSuccess(`Successfully registered ${successCount} out of ${trucks.length} trucks.`);
-          if (fileInputRef.current) fileInputRef.current.value = '';
-        } else {
-          setError(data.message || 'Bulk upload failed');
+        let successCount = 0;
+        for (const truck of trucks) {
+          try {
+            const truckId = uuidv4();
+            await setDoc(doc(db, 'trucks', truckId), {
+              ...truck,
+              is_blacklisted: false,
+              created_at: serverTimestamp()
+            });
+            successCount++;
+          } catch (e) {
+            console.error('Failed to add truck', truck, e);
+          }
         }
+        
+        setSuccess(`Successfully registered ${successCount} out of ${trucks.length} trucks.`);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       } catch (err) {
         setError('Error parsing CSV file');
       }
@@ -179,7 +200,7 @@ export default function TruckRegistration() {
     <div className="max-w-2xl mx-auto bg-white p-8 rounded-xl shadow-sm border border-gray-100">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-900">Register New Truck</h2>
-        {user?.role === 'admin' && (
+        {['super_admin', 'admin', 'queue_manager'].includes(user?.role || '') && (
           <div>
             <input 
               type="file" 

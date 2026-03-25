@@ -1,14 +1,84 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
-import { QrCode, AlertCircle, CheckCircle } from 'lucide-react';
+import { QrCode, AlertCircle, CheckCircle, AlertTriangle } from 'lucide-react';
+import { db } from '../firebase';
+import { doc, getDoc, setDoc, collection, serverTimestamp, query, where, getDocs, onSnapshot } from 'firebase/firestore';
+import { useAuth } from '../context/AuthContext';
+import { v4 as uuidv4 } from 'uuid';
 
 export default function GateEntry() {
+  const { user } = useAuth();
   const [scanResult, setScanResult] = useState<string | null>(null);
   const [truckInfo, setTruckInfo] = useState<any>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [priority, setPriority] = useState('normal');
+  const [manualId, setManualId] = useState('');
+  const [currentRound, setCurrentRound] = useState<number>(1);
+  const [selectedCaneType, setSelectedCaneType] = useState('Normal');
+  const [caneTypes, setCaneTypes] = useState<string[]>(['Normal', 'Sling', 'Burnt Cane', 'Debt Cane', 'Special Q (A)', 'Special Q (B)', 'Irrigation Cane', 'Other(PZG,Tri-Cycle,OX-Cart)']);
+  const [needsOverride, setNeedsOverride] = useState(false);
+  const [maxWaitTime, setMaxWaitTime] = useState<number>(0);
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
+
+  useEffect(() => {
+    // Fetch current round
+    const fetchRound = async () => {
+      const docSnap = await getDoc(doc(db, 'settings', 'system'));
+      if (docSnap.exists()) {
+        setCurrentRound(docSnap.data().current_round || 1);
+      }
+    };
+    fetchRound();
+
+    // Fetch cane types
+    const fetchSettings = async () => {
+      try {
+        const configDoc = await getDoc(doc(db, 'settings', 'config'));
+        if (configDoc.exists()) {
+          const data = configDoc.data();
+          if (data.cane_types && data.cane_types.length > 0) {
+            setCaneTypes(data.cane_types);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch settings', err);
+      }
+    };
+    fetchSettings();
+
+    // Fetch max wait time
+    const fetchMaxWaitTime = async () => {
+      const q = query(
+        collection(db, 'queues'),
+        where('status', '==', 'waiting')
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        if (!snapshot.empty) {
+          let oldestEntryTime = new Date();
+          snapshot.forEach(d => {
+            const data = d.data();
+            if (data.entry_time) {
+              const entryTime = data.entry_time.toDate();
+              if (entryTime < oldestEntryTime) {
+                oldestEntryTime = entryTime;
+              }
+            }
+          });
+          const waitMins = Math.round((new Date().getTime() - oldestEntryTime.getTime()) / 60000);
+          setMaxWaitTime(waitMins > 0 ? waitMins : 0);
+        } else {
+          setMaxWaitTime(0);
+        }
+      });
+      return unsubscribe;
+    };
+    const unsubscribeWaitTime = fetchMaxWaitTime();
+    
+    return () => {
+      unsubscribeWaitTime.then(unsub => unsub());
+    };
+  }, []);
 
   useEffect(() => {
     if (!scannerRef.current && !scanResult) {
@@ -41,11 +111,38 @@ export default function GateEntry() {
     // Ignore frequent scan failures
   };
 
+  const handleManualSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (manualId.trim()) {
+      onScanSuccess(manualId.trim());
+    }
+  };
+
   const fetchTruckInfo = async (id: string) => {
     try {
-      const res = await fetch(`/api/trucks/${id}`);
-      if (res.ok) {
-        setTruckInfo(await res.json());
+      const docRef = doc(db, 'trucks', id);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setTruckInfo(data);
+        setSelectedCaneType(data.cane_type || 'Normal');
+
+        // Check if truck already entered in current round
+        const q = query(
+          collection(db, 'queues'),
+          where('truck_id', '==', id),
+          where('round_id', '==', currentRound)
+        );
+        const queueSnap = await getDocs(q);
+        
+        if (!queueSnap.empty) {
+          setNeedsOverride(true);
+          setError(`Warning: This truck has already entered in Round ${currentRound}.`);
+        } else {
+          setNeedsOverride(false);
+        }
+
       } else {
         setError('Truck not found in database');
       }
@@ -55,19 +152,54 @@ export default function GateEntry() {
   };
 
   const handleEntry = async () => {
+    if (needsOverride && user?.role !== 'super_admin') {
+      setError('Only Super Admin can override and allow double entry in the same round.');
+      return;
+    }
+
     try {
-      const res = await fetch('/api/queues/entry', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ truck_id: scanResult, priority })
+      // Calculate seniority number for this cane type in this round
+      const seniorityQuery = query(
+        collection(db, 'queues'),
+        where('round_id', '==', currentRound),
+        where('cane_type', '==', selectedCaneType)
+      );
+      const senioritySnap = await getDocs(seniorityQuery);
+      const seniorityNumber = senioritySnap.size + 1;
+
+      const queueId = uuidv4();
+      await setDoc(doc(db, 'queues', queueId), {
+        truck_id: scanResult,
+        status: 'waiting',
+        priority: priority,
+        entry_time: serverTimestamp(),
+        gate_id: 'entry_gate_1', // Assuming a default gate ID
+        round_id: currentRound,
+        cane_type: selectedCaneType,
+        seniority_number: seniorityNumber,
+        is_double_entry: needsOverride
       });
-      const data = await res.json();
-      if (data.success) {
-        setSuccess('Truck added to queue successfully');
-        setTimeout(() => resetScanner(), 3000);
-      } else {
-        setError(data.message);
+
+      // Update truck's cane_type and round_entry_limit
+      if (scanResult) {
+        const truckRef = doc(db, 'trucks', scanResult);
+        await setDoc(truckRef, {
+          cane_type: selectedCaneType,
+          round_entry_limit: currentRound,
+          last_entry_time: serverTimestamp()
+        }, { merge: true });
       }
+
+      // Add audit log
+      await setDoc(doc(collection(db, 'audit_logs')), {
+        user_id: user?.id || 'unknown',
+        action: 'GATE_ENTRY',
+        details: `Truck ${scanResult} entered gate (Round ${currentRound}${needsOverride ? ', Double Entry' : ''})`,
+        timestamp: serverTimestamp()
+      });
+
+      setSuccess('Truck added to queue successfully');
+      setTimeout(() => resetScanner(), 3000);
     } catch (err) {
       setError('Failed to add to queue');
     }
@@ -79,6 +211,7 @@ export default function GateEntry() {
     setError('');
     setSuccess('');
     setPriority('normal');
+    setNeedsOverride(false);
   };
 
   return (
@@ -104,8 +237,26 @@ export default function GateEntry() {
         )}
 
         {!scanResult ? (
-          <div className="overflow-hidden rounded-xl border-2 border-dashed border-gray-300">
-            <div id="reader" className="w-full"></div>
+          <div className="space-y-6">
+            <div className="overflow-hidden rounded-xl border-2 border-dashed border-gray-300">
+              <div id="reader" className="w-full"></div>
+            </div>
+            <div className="text-center text-sm text-gray-500">OR</div>
+            <form onSubmit={handleManualSubmit} className="flex gap-2">
+              <input
+                type="text"
+                value={manualId}
+                onChange={(e) => setManualId(e.target.value)}
+                placeholder="Enter Truck ID manually"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium transition-colors"
+              >
+                Submit
+              </button>
+            </form>
           </div>
         ) : (
           <div className="space-y-6">
@@ -126,13 +277,31 @@ export default function GateEntry() {
                     <p className="font-medium text-gray-900">{truckInfo.company}</p>
                   </div>
                   <div>
-                    <p className="text-gray-500">Cane Type</p>
-                    <p className="font-medium text-gray-900">{truckInfo.cane_type}</p>
+                    <p className="text-gray-500">Vehicle Type</p>
+                    <p className="font-medium text-gray-900">{truckInfo.vehicle_type}</p>
                   </div>
                 </div>
 
                 <div className="mt-6 pt-6 border-t border-gray-200">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Queue Priority</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Cane Type (Current Trip)</label>
+                  <select
+                    value={selectedCaneType}
+                    onChange={(e) => setSelectedCaneType(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  >
+                    {caneTypes.map(type => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-gray-200">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-sm font-medium text-gray-700">Queue Priority</label>
+                    <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                      Estimated Wait: ~{maxWaitTime}m
+                    </span>
+                  </div>
                   <div className="flex space-x-4">
                     <label className="flex items-center">
                       <input
@@ -164,13 +333,33 @@ export default function GateEntry() {
               >
                 Scan Again
               </button>
-              <button
-                onClick={handleEntry}
-                disabled={!truckInfo || !!success}
-                className="flex-1 px-4 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium transition-colors disabled:opacity-50"
-              >
-                Confirm Entry
-              </button>
+              {needsOverride ? (
+                user?.role === 'super_admin' ? (
+                  <button
+                    onClick={handleEntry}
+                    disabled={!truckInfo || !!success}
+                    className="flex-1 px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium transition-colors disabled:opacity-50 flex items-center justify-center"
+                  >
+                    <AlertTriangle className="w-5 h-5 mr-2" />
+                    Override & Allow Double Entry
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    className="flex-1 px-4 py-3 bg-gray-300 text-gray-500 rounded-lg font-medium cursor-not-allowed"
+                  >
+                    Double Entry Blocked
+                  </button>
+                )
+              ) : (
+                <button
+                  onClick={handleEntry}
+                  disabled={!truckInfo || !!success}
+                  className="flex-1 px-4 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium transition-colors disabled:opacity-50"
+                >
+                  Confirm Entry
+                </button>
+              )}
             </div>
           </div>
         )}

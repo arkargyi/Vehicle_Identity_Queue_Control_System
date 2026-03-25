@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Save, Plus, Trash2, AlertCircle, CheckCircle } from 'lucide-react';
+import { db } from '../firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 export default function Settings() {
   const [caneTypes, setCaneTypes] = useState<string[]>([]);
@@ -15,11 +17,19 @@ export default function Settings() {
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch('/api/settings');
-      const data = await res.json();
-      if (data.cane_types) setCaneTypes(data.cane_types);
-      if (data.priority_rules) setPriorityRules(data.priority_rules);
-    } catch (err) {
+      const docRef = doc(db, 'settings', 'config');
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.cane_types) setCaneTypes(data.cane_types);
+        if (data.priority_rules) setPriorityRules(data.priority_rules);
+      } else {
+        // Initialize if not exists
+        setCaneTypes(['Normal', 'Sling', 'Burnt Cane', 'Debt Cane', 'Special Q (A)', 'Special Q (B)', 'Irrigation Cane', 'Other(PZG,Tri-Cycle,OX-Cart)']);
+        setPriorityRules({ high_priority_types: ['Special Q (A)', 'Special Q (B)'] });
+      }
+    } catch (err: any) {
+      console.error('Failed to load settings', err);
       setError('Failed to load settings');
     } finally {
       setLoading(false);
@@ -30,21 +40,14 @@ export default function Settings() {
     setError('');
     setSuccess('');
     try {
-      const res = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cane_types: caneTypes,
-          priority_rules: priorityRules
-        })
-      });
+      await setDoc(doc(db, 'settings', 'config'), {
+        cane_types: caneTypes,
+        priority_rules: priorityRules
+      }, { merge: true });
       
-      if (res.ok) {
-        setSuccess('Settings saved successfully');
-      } else {
-        setError('Failed to save settings');
-      }
+      setSuccess('Settings saved successfully');
     } catch (err) {
+      console.error('Failed to save settings', err);
       setError('Failed to save settings');
     }
   };

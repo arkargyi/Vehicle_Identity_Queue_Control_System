@@ -1,12 +1,17 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { QrCode, AlertCircle, CheckCircle } from 'lucide-react';
+import { db } from '../firebase';
+import { doc, getDoc, setDoc, collection, serverTimestamp, query, where, getDocs, updateDoc } from 'firebase/firestore';
+import { useAuth } from '../context/AuthContext';
 
 export default function GateExit() {
+  const { user } = useAuth();
   const [scanResult, setScanResult] = useState<string | null>(null);
   const [truckInfo, setTruckInfo] = useState<any>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [manualId, setManualId] = useState('');
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
   useEffect(() => {
@@ -40,11 +45,20 @@ export default function GateExit() {
     // Ignore frequent scan failures
   };
 
+  const handleManualSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (manualId.trim()) {
+      onScanSuccess(manualId.trim());
+    }
+  };
+
   const fetchTruckInfo = async (id: string) => {
     try {
-      const res = await fetch(`/api/trucks/${id}`);
-      if (res.ok) {
-        setTruckInfo(await res.json());
+      const docRef = doc(db, 'trucks', id);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        setTruckInfo(docSnap.data());
       } else {
         setError('Truck not found in database');
       }
@@ -55,18 +69,41 @@ export default function GateExit() {
 
   const handleExit = async () => {
     try {
-      const res = await fetch('/api/queues/exit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ truck_id: scanResult })
+      // Find the active queue for this truck
+      const q = query(
+        collection(db, 'queues'), 
+        where('truck_id', '==', scanResult)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      
+      const activeQueues = querySnapshot.docs.filter(d => {
+        const status = d.data().status;
+        return ['waiting', 'called', 'processing'].includes(status);
       });
-      const data = await res.json();
-      if (data.success) {
-        setSuccess('Truck exited successfully. Queue session closed.');
-        setTimeout(() => resetScanner(), 3000);
-      } else {
-        setError(data.message);
+      
+      if (activeQueues.length === 0) {
+        setError('No active queue session found for this truck');
+        return;
       }
+
+      // Update the queue status to completed
+      const queueDoc = activeQueues[0];
+      await updateDoc(doc(db, 'queues', queueDoc.id), {
+        status: 'completed',
+        exit_time: serverTimestamp()
+      });
+
+      // Add audit log
+      await setDoc(doc(collection(db, 'audit_logs')), {
+        user_id: user?.id || 'unknown',
+        action: 'GATE_EXIT',
+        details: `Truck ${scanResult} exited gate`,
+        timestamp: serverTimestamp()
+      });
+
+      setSuccess('Truck exited successfully. Queue session closed.');
+      setTimeout(() => resetScanner(), 3000);
     } catch (err) {
       setError('Failed to process exit');
     }
@@ -102,8 +139,26 @@ export default function GateExit() {
         )}
 
         {!scanResult ? (
-          <div className="overflow-hidden rounded-xl border-2 border-dashed border-gray-300">
-            <div id="reader-exit" className="w-full"></div>
+          <div className="space-y-6">
+            <div className="overflow-hidden rounded-xl border-2 border-dashed border-gray-300">
+              <div id="reader-exit" className="w-full"></div>
+            </div>
+            <div className="text-center text-sm text-gray-500">OR</div>
+            <form onSubmit={handleManualSubmit} className="flex gap-2">
+              <input
+                type="text"
+                value={manualId}
+                onChange={(e) => setManualId(e.target.value)}
+                placeholder="Enter Truck ID manually"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium transition-colors"
+              >
+                Submit
+              </button>
+            </form>
           </div>
         ) : (
           <div className="space-y-6">

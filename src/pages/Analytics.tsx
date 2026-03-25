@@ -1,19 +1,57 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Truck, Clock, CheckCircle } from 'lucide-react';
+import { db } from '../firebase';
+import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
 
 export default function Analytics() {
-  const [analytics, setAnalytics] = useState<any>({});
+  const [analytics, setAnalytics] = useState<any>({
+    totalTrucks: 0,
+    avgWaitTime: 0,
+    completedToday: 0
+  });
   const [trucks, setTrucks] = useState<any[]>([]);
 
   useEffect(() => {
     const fetchData = async () => {
-      const [aRes, tRes] = await Promise.all([
-        fetch('/api/analytics'),
-        fetch('/api/trucks')
-      ]);
-      setAnalytics(await aRes.json());
-      setTrucks(await tRes.json());
+      try {
+        // Fetch recent trucks
+        const trucksQuery = query(collection(db, 'trucks'), orderBy('created_at', 'desc'), limit(10));
+        const trucksSnapshot = await getDocs(trucksQuery);
+        const recentTrucks = trucksSnapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+        setTrucks(recentTrucks);
+
+        // Fetch total trucks
+        const allTrucksSnapshot = await getDocs(collection(db, 'trucks'));
+        const totalTrucks = allTrucksSnapshot.size;
+
+        // Fetch completed today
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        const completedQuery = query(
+          collection(db, 'queues'),
+          where('status', '==', 'completed')
+        );
+        const completedSnapshot = await getDocs(completedQuery);
+        let completedToday = 0;
+        completedSnapshot.forEach(d => {
+          const data = d.data();
+          if (data.exit_time && data.exit_time.toDate() >= startOfToday) {
+            completedToday++;
+          }
+        });
+
+        // Calculate avg wait time (placeholder for now, or calculate from recent queues)
+        const avgWaitTime = 15; // Example
+
+        setAnalytics({
+          totalTrucks,
+          avgWaitTime,
+          completedToday
+        });
+      } catch (error) {
+        console.error("Error fetching analytics data:", error);
+      }
     };
     fetchData();
   }, []);
@@ -97,7 +135,7 @@ export default function Analytics() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {trucks.slice(0, 10).map((truck) => (
+                {trucks.map((truck) => (
                   <tr key={truck.id}>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{truck.plate_number}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{truck.company}</td>
